@@ -1,2 +1,2 @@
 # ros_homework_zju
-Coming soon...
+Please refer to the readme.md in floder src, FYI, some bugs may occur when operating our code, plz wait me to update. 1.11
