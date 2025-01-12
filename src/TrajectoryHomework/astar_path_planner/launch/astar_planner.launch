@@ -35,7 +35,7 @@
     
 
     <!--    启动轨迹生成节点-->
-    <node pkg="astar_path_planner" type="Trajectory" name="Trajectory" output="screen">
+    <node pkg="astar_path_planner" type="trajectory" name="trajectory" output="screen">
     </node>
     <!--    your code-->
 

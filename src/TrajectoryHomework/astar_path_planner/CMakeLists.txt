@@ -19,9 +19,7 @@ include_directories(
         ${OSQP_EIGEN_INCLUDE_DIRS}
 )
 
-add_executable(obstacle_generator 
-		src/obstacle_generator.cpp
-)
+add_executable(obstacle_generator src/obstacle_generator.cpp)
 target_link_libraries(obstacle_generator ${catkin_LIBRARIES})
 
 

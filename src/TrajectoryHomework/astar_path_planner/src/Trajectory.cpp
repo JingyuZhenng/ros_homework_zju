@@ -1,155 +1,146 @@
+#include <ros/ros.h>
 #include <iostream>
 #include <vector>
 #include <Eigen/Dense>
 #include <cmath>
-#include <qpOASES.hpp>
-
+#include "nav_msgs/Path.h"
+#include <geometry_msgs/PoseStamped.h>
+//特别鸣谢：Zhang Zhimeng and Gao Fei from zju
+//参考资料：https://blog.csdn.net/u011341856/article/details/121861930
 typedef std::vector<Eigen::Vector2d> Path;
+typedef typename Eigen::MatrixXd MatXd;
+typedef typename Eigen::VectorXd VecXd;
+typedef typename Eigen::Vector2d Vec2d;
+double Factorial(unsigned int x) {
+    unsigned int fac = 1;
+
+    for (unsigned int i = x; i > 0; --i) {
+        fac = fac * i;
+    }
+
+    return static_cast<double>(fac);
+}//阶乘函数
 
 class TrajectoryGenerator {
 public:
-    TrajectoryGenerator() = default;
+    // 构造函数：初始化地图尺寸、分辨率等参数
+    TrajectoryGenerator(int width, int height, double m_min, double m_max, double res)
+        : width_(width), height_(height), map_min_(m_min), map_max_(m_max), grid_resolution_(res) {
+    }
 
-    // 生成轨迹的方法
-    bool generateTrajectory(const Path& path, std::vector<Eigen::VectorXd>& trajectory_x, std::vector<Eigen::VectorXd>& trajectory_y) {
-        if (path.size() < 2) {
-            std::cerr << "Path too short to generate trajectory." << std::endl;
-            return false;
+    // 生成轨迹：基于输入路径生成六次多项式轨迹
+    std::vector<Eigen::Vector2d> GenerateTrajectory(const std::vector<Eigen::Vector2d>& path) {
+        std::vector<Eigen::Vector2d> trajectory;
+        if (path.size() < 2)//如果点不到两个就直接返回轨迹
+            return trajectory; 
+
+        // 假定每段轨迹时间为1秒
+        double dt = 1.0;
+
+        for (size_t i = 0; i < path.size() - 1; ++i) {
+            Eigen::Vector2d start = path[i];  // 当前路径点
+            Eigen::Vector2d end = path[i + 1];  // 下一个路径点
+
+            // 计算六次多项式的系数
+            Eigen::VectorXd x_coeffs = computeSixthOrderPolynomial(start.x(), 0.0, 0.0, 0.0, end.x(), 0.0, 0.0, 0.0, dt);
+            Eigen::VectorXd y_coeffs = computeSixthOrderPolynomial(start.y(), 0.0, 0.0, 0.0, end.y(), 0.0, 0.0, 0.0, dt);
+
+            // 生成轨迹点：根据时间间隔逐步计算轨迹
+            for (double t = 0; t <= dt; t += 0.1) {
+                double x = 0.0;
+                double y = 0.0;
+                for (int j = 0; j < 6; ++j) {
+                    x += x_coeffs[j] * std::pow(t, j);  // 计算 x 坐标
+                    y += y_coeffs[j] * std::pow(t, j);  // 计算 y 坐标
+                }
+                trajectory.push_back(Eigen::Vector2d(x, y));  // 保存轨迹点
+            }
         }
 
-        // 分配每段的时间，简单假设每段时间相等
-        int n_segments = path.size() - 1;
-        double total_time = 10.0; // 总时间可以根据需要调整
-        double dt = total_time / n_segments;
-
-        // 初始化轨迹存储
-        trajectory_x.clear();
-        trajectory_y.clear();
-
-        // 对每个维度分别进行处理
-        std::vector<double> waypoints_x, waypoints_y;
-        for (const auto& point : path) {
-            waypoints_x.push_back(point.x());
-            waypoints_y.push_back(point.y());
-        }
-
-        // 生成x和y方向的轨迹
-        bool success_x = generateQuinticPolynomial(waypoints_x, dt, trajectory_x);
-        bool success_y = generateQuinticPolynomial(waypoints_y, dt, trajectory_y);
-
-        return success_x && success_y;
+        return trajectory;  // 返回生成的完整轨迹
     }
 
 private:
-    // 生成五次多项式轨迹
-    bool generateQuinticPolynomial(const std::vector<double>& waypoints, double dt, std::vector<Eigen::VectorXd>& trajectory) {
-        int n = waypoints.size();
-        int n_segments = n - 1;
+    int width_, height_;
+    double map_min_, map_max_, grid_resolution_;
 
-        // 每个多项式有6个系数
-        int n_coeffs = 6;
+    // 计算六次多项式系数：利用边界条件（位置、速度、加速度等）
+    Eigen::VectorXd computeSixthOrderPolynomial(double start_pos, double start_vel, double start_acc, double start_jerk,
+        double end_pos, double end_vel, double end_acc, double end_jerk, double dt) {
+        Eigen::MatrixXd M(6, 6);  // 六次多项式的系数矩阵
+        M << 1, 0, 0, 0, 0, 0,
+            0, 1, 0, 0, 0, 0,
+            0, 0, 2, 0, 0, 0,
+            1, dt, std::pow(dt, 2), std::pow(dt, 3), std::pow(dt, 4), std::pow(dt, 5),
+            0, 1, 2 * dt, 3 * std::pow(dt, 2), 4 * std::pow(dt, 3), 5 * std::pow(dt, 4),
+            0, 0, 2, 6 * dt, 12 * std::pow(dt, 2), 20 * std::pow(dt, 3);
 
-        // 构建矩阵A和向量b
-        // 需要满足每个段的起始和结束位置、速度、加速度
-        // 总共有 2*n_segments * 3 constraints
-        int n_constraints = 6 * n_segments;
-        Eigen::MatrixXd A = Eigen::MatrixXd::Zero(n_constraints, n_coeffs * n_segments);
-        Eigen::VectorXd b = Eigen::VectorXd::Zero(n_constraints);
+        Eigen::VectorXd boundary_conditions(6);  // 存储起始和结束的边界条件
+        boundary_conditions << start_pos, start_vel, start_acc, end_pos, end_vel, end_acc;
 
-        for (int i = 0; i < n_segments; ++i) {
-            // Start conditions
-            double t0 = 0.0;
-            double tf = dt;
-
-            // Position at t0
-            A(6*i, i*n_coeffs + 0) = 1;
-            b(6*i) = waypoints[i];
-            // Velocity at t0
-            A(6*i+1, i*n_coeffs + 1) = 1;
-            b(6*i+1) = 0.0;
-            // Acceleration at t0
-            A(6*i+2, i*n_coeffs + 2) = 2;
-            b(6*i+2) = 0.0;
-
-            // Position at tf
-            A(6*i+3, i*n_coeffs + 0) = 1;
-            A(6*i+3, i*n_coeffs + 1) = tf;
-            A(6*i+3, i*n_coeffs + 2) = pow(tf, 2);
-            A(6*i+3, i*n_coeffs + 3) = pow(tf, 3);
-            A(6*i+3, i*n_coeffs + 4) = pow(tf, 4);
-            A(6*i+3, i*n_coeffs + 5) = pow(tf, 5);
-            b(6*i+3) = waypoints[i+1];
-            // Velocity at tf
-            A(6*i+4, i*n_coeffs + 1) = 1;
-            A(6*i+4, i*n_coeffs + 2) = 2*tf;
-            A(6*i+4, i*n_coeffs + 3) = 3*pow(tf, 2);
-            A(6*i+4, i*n_coeffs + 4) = 4*pow(tf, 3);
-            A(6*i+4, i*n_coeffs + 5) = 5*pow(tf, 4);
-            b(6*i+4) = 0.0;
-            // Acceleration at tf
-            A(6*i+5, i*n_coeffs + 2) = 2;
-            A(6*i+5, i*n_coeffs + 3) = 6*tf;
-            A(6*i+5, i*n_coeffs + 4) = 12*pow(tf, 2);
-            A(6*i+5, i*n_coeffs + 5) = 20*pow(tf, 3);
-            b(6*i+5) = 0.0;
-        }
-
-        // 设置连续性约束
-        // 位置、速度、加速度在每个连接点处连续
-        // 这里简化处理，只保证每段的末端和下一段的起始端一致
-        // 可以进一步优化以确保更高的连续性
-
-        // 构建QP问题
-        // 目标是最小化所有段的加加速度（jerk）
-        // 可以通过最小化系数矩阵的某些组合来实现
-
-        // 这里为了简化，使用最小二乘法求解
-        // A * x = b
-        // x = (A^T A)^-1 A^T b
-
-        Eigen::VectorXd coeffs = (A.transpose() * A).ldlt().solve(A.transpose() * b);
-
-        if ((A * coeffs - b).norm() > 1e-6) {
-            std::cerr << "Warning: Trajectory generation might be inaccurate." << std::endl;
-        }
-
-        // 将系数分段存储
-        for (int i = 0; i < n_segments; ++i) {
-            Eigen::VectorXd segment_coeffs(n_coeffs);
-            for (int j = 0; j < n_coeffs; ++j) {
-                segment_coeffs(j) = coeffs(i*n_coeffs + j);
-            }
-            trajectory.push_back(segment_coeffs);
-        }
-
-        return true;
+        // 求解线性方程组，得到六次多项式系数
+        return M.colPivHouseholderQr().solve(boundary_conditions);
     }
-};
+  };
 
-int main() {
-    // 示例路径
-    Path path = {
-        Eigen::Vector2d(0, 0),
-        Eigen::Vector2d(1, 2),
-        Eigen::Vector2d(4, 3),
-        Eigen::Vector2d(6, 5)
-    };
+int main(int argc, char** argv) {
+    ros::init(argc, argv, "trajectory_generator");
+    ros::NodeHandle nh;
+    ros::Publisher trajectory_pub = nh.advertise<nav_msgs::Path>("generated_trajectory", 1);
+    ros::Rate loop_rate(10);  // 设置ROS循环频率为10Hz
 
-    TrajectoryGenerator generator;
-    std::vector<Eigen::VectorXd> trajectory_x, trajectory_y;
+    // 初始化路径变量和标志位
+    Path received_path;
+    bool path_received = false;
 
-    if (generator.generateTrajectory(path, trajectory_x, trajectory_y)) {
-        std::cout << "Trajectory generated successfully." << std::endl;
+    // 接收外部输入的路径（即接受Astar取得的路径）
+    ros::Subscriber path_subscriber = nh.subscribe<nav_msgs::Path>("path", 1,
+        [&received_path, &path_received](const nav_msgs::Path::ConstPtr& msg) {
+            received_path.clear();  // 清空已有路径
+            for (const auto& pose : msg->poses) {
+                received_path.push_back(Eigen::Vector2d(pose.pose.position.x, pose.pose.position.y));  // 存储路径点
+            }
+            path_received = true;  // 标记路径已接收
+        });
 
-        // 打印轨迹系数
-        for (size_t i = 0; i < trajectory_x.size(); ++i) {
-            std::cout << "Segment " << i << " X coefficients: " << trajectory_x[i].transpose() << std::endl;
-            std::cout << "Segment " << i << " Y coefficients: " << trajectory_y[i].transpose() << std::endl;
+    // 创建轨迹生成器对象
+    TrajectoryGenerator generator(100, 100, -5.0, 5.0, 0.1);
+    std::vector<Eigen::Vector2d> trajectory_points;
+
+    while (ros::ok()) {
+        ros::spinOnce();  // 调用回调函数，处理ROS消息
+
+        if (path_received) {
+            ROS_INFO("New path received. Path length: %zu", received_path.size());  // 输出路径点的数量
+            ros::Time start_time = ros::Time::now();
+            trajectory_points = generator.GenerateTrajectory(received_path);  // 生成轨迹
+            ros::Time end_time = ros::Time::now();
+            ROS_INFO("The time cost is:%f", end_time.toSec()-start_time.toSec());
+            path_received = false;  // 重置路径接收标志
         }
-    } else {
-        std::cerr << "Failed to generate trajectory." << std::endl;
+
+        // 发布生成的轨迹
+        if (!trajectory_points.empty()) {
+            nav_msgs::Path trajectory_msg;
+            trajectory_msg.header.frame_id = "map";  // 设定轨迹的坐标系为map
+            trajectory_msg.header.stamp = ros::Time::now();  // 设置时间戳
+
+            // 将轨迹点转换为消息并添加到轨迹消息中
+            for (const auto& point : trajectory_points) {
+                geometry_msgs::PoseStamped pose;
+                pose.pose.position.x = point.x();
+                pose.pose.position.y = point.y();
+                pose.pose.position.z = 0.0;  
+                trajectory_msg.poses.push_back(pose);
+            }
+
+            trajectory_pub.publish(trajectory_msg);  // 发布轨迹消息
+        }
+
+        loop_rate.sleep();  // 按照设定的频率休眠
     }
 
     return 0;
 }
+
 
